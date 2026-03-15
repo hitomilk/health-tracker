@@ -1,0 +1,1175 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <title>Health Tracker</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+  <script src="https://unpkg.com/d3-shape@3.2.0/dist/d3-shape.umd.min.js"></script>
+  <script src="https://unpkg.com/d3-scale@4.0.2/dist/d3-scale.umd.min.js"></script>
+  <script src="https://unpkg.com/recharts@2.1.9/umd/Recharts.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+const { useState, useRef, useEffect } = React;
+const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } = Recharts;
+
+
+
+const GOALS = {
+  training: { calories: 1700, protein: 110, fat: 35, carbs: 165 },
+  rest:      { calories: 1320, protein: 110, fat: 35, carbs: 100 },
+};
+const MATCH_DATE     = "2026-03-22";
+const TARGET_WEIGHT  = 55.0;
+const MORNING_TARGET = 54.8; // 当日朝ターゲット（計量15時、軽食後に計量へ）
+
+// ── 減量フェーズ定義 ──────────────────────────────
+const PHASES = [
+  {
+    id: "diet",
+    name: "① カロリー管理期",
+    range: ["2026-03-06", "2026-03-17"],
+    color: "#4ecdc4",
+    emoji: "🥗",
+    target: "食事管理で −0.8kg",
+    rules: [
+      "今の食事プランを継続（休養日1320kcal / 練習日1700kcal）",
+      "タンパク質110gをしっかり確保",
+      "脂質35g以上を維持（ホルモンバランス）",
+      "加工食品・外食は控えめに",
+    ],
+    foods: ["鶏胸肉", "白身魚", "豆腐", "卵", "オートミール", "玄米", "ブロッコリー", "ほうれん草"],
+    avoid: ["ラーメン・うどん（塩分過多）", "お菓子・甘い飲み物", "揚げ物"],
+    calorieOverride: null,
+  },
+  {
+    id: "lowsalt",
+    name: "② 塩抜き移行期",
+    range: ["2026-03-18", "2026-03-20"],
+    color: "#f7b731",
+    emoji: "🧂",
+    target: "塩抜きで −0.5kg",
+    rules: [
+      "塩分を1日3g以下に制限（通常の1/3以下）",
+      "調味料はレモン汁・酢・ハーブのみ",
+      "食事量を通常の80%に",
+      "水分は2L以上しっかり摂る（むくみを流す）",
+      "蒸す・茹でる調理法に統一",
+    ],
+    foods: ["蒸し鶏", "茹でた白身魚", "茹で卵", "無塩豆腐", "サツマイモ", "バナナ", "アボカド"],
+    avoid: ["醤油・味噌・塩", "漬物・梅干し", "チーズ・加工肉", "外食全般"],
+    calorieOverride: { rest: 1200, training: 1500 },
+  },
+  {
+    id: "final",
+    name: "③ 最終絞り込み期",
+    range: ["2026-03-21", "2026-03-22"],
+    color: "#fb923c",
+    emoji: "🔥",
+    target: "仕上げで −0.3kg",
+    rules: [
+      "塩分ほぼゼロ（無塩食材のみ）",
+      "食物繊維・発酵食品を減らす（腸内ガス・内容物を減らす）",
+      "食事量は最小限（空腹感より体重優先）",
+      "水分は計量の3時間前から控える",
+      "計量後はすぐバナナ・おにぎりでリカバリー",
+    ],
+    foods: ["蒸し鶏胸肉（無塩）", "白米（少量）", "バナナ", "茹で卵白"],
+    avoid: ["食物繊維の多い野菜（キャベツ・ごぼう）", "豆類", "ヨーグルト・乳製品", "炭酸水"],
+    calorieOverride: { rest: 1000, training: 1200 },
+  },
+];
+
+const getPhase = (dateStr) => {
+  return PHASES.find(p => dateStr >= p.range[0] && dateStr <= p.range[1]) || null;
+};
+
+
+const today = () => new Date().toISOString().slice(0, 10);
+
+const SAMPLE_DATA = {
+  "2026-03-01": {
+    weight: 56.75, training: false,
+    body: { bmi:20.3, fatPct:24.1, leanMass:43.1, subFat:22.8, visceralFat:3, water:52.0, musclePct:44.2, muscleMass:40.5, boneMass:2.59, proteinPct:18.1, bmr:1302 },
+    meals: [
+      { id:1, time:"breakfast", name:"オートミール50g・プロテイン・ゆで卵", calories:380, protein:38, fat:9,  carbs:42 },
+      { id:2, time:"lunch",     name:"鶏胸肉150g・玄米・ブロッコリー",     calories:480, protein:42, fat:8,  carbs:58 },
+      { id:3, time:"dinner",    name:"サーモン刺身・豆腐・味噌汁",         calories:360, protein:32, fat:14, carbs:22 },
+    ],
+  },
+  "2026-03-02": {
+    weight: 56.55, training: true,
+    body: { bmi:20.2, fatPct:23.9, leanMass:43.1, subFat:22.5, visceralFat:3, water:52.2, musclePct:44.4, muscleMass:40.6, boneMass:2.59, proteinPct:18.1, bmr:1302 },
+    meals: [
+      { id:1, time:"breakfast", name:"バナナ・プロテインシェイク",           calories:320, protein:30, fat:5,  carbs:42 },
+      { id:2, time:"lunch",     name:"鶏むね照り焼き・ご飯・サラダ",         calories:520, protein:40, fat:10, carbs:68 },
+      { id:3, time:"dinner",    name:"豚ヒレ150g・野菜炒め・もち麦ご飯",     calories:540, protein:40, fat:12, carbs:58 },
+      { id:4, time:"snack",     name:"プロテインバー",                       calories:200, protein:20, fat:6,  carbs:22 },
+    ],
+  },
+  "2026-03-05": {
+    weight: 56.75, training: false,
+    body: { bmi:20.1, fatPct:23.9, leanMass:43.2, subFat:22.5, visceralFat:3, water:52.2, musclePct:44.4, muscleMass:40.6, boneMass:2.59, proteinPct:18.1, bmr:1302 },
+    meals: [],
+  },
+};
+
+const getMealTotals = (meals = []) =>
+  meals.reduce((acc, m) => ({ calories:acc.calories+m.calories, protein:acc.protein+m.protein, fat:acc.fat+m.fat, carbs:acc.carbs+m.carbs }),
+    { calories:0, protein:0, fat:0, carbs:0 });
+
+const daysUntilMatch = () => Math.max(0, Math.ceil((new Date(MATCH_DATE) - new Date(today())) / 86400000));
+
+// ── Sub-components ──────────────────────────────
+
+const ProgressRing = ({ value, goal, color, label, unit="g" }) => {
+  const r=28, circ=2*Math.PI*r, pct=Math.min(value/goal,1.2), over=pct>1;
+  return (
+    <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:4 }}>
+      <svg width={70} height={70} style={{ transform:"rotate(-90deg)" }}>
+        <circle cx={35} cy={35} r={r} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth={5}/>
+        <circle cx={35} cy={35} r={r} fill="none" stroke={over?"#ff6b6b":color} strokeWidth={5}
+          strokeDasharray={circ} strokeDashoffset={circ*(1-Math.min(pct,1))} strokeLinecap="round"
+          style={{ transition:"stroke-dashoffset 0.6s ease" }}/>
+      </svg>
+      <div style={{ marginTop:-54, zIndex:2, textAlign:"center" }}>
+        <div style={{ fontSize:15, fontWeight:700, color:over?"#ff6b6b":"#fff", fontFamily:"'DM Mono',monospace" }}>{Math.round(value)}</div>
+        <div style={{ fontSize:9, color:"rgba(255,255,255,0.45)", letterSpacing:1, textTransform:"uppercase" }}>{unit}</div>
+      </div>
+      <div style={{ marginTop:6, fontSize:10, color:"rgba(255,255,255,0.5)" }}>{label}</div>
+      <div style={{ fontSize:10, color:"rgba(255,255,255,0.3)" }}>/ {goal}{unit}</div>
+    </div>
+  );
+};
+
+const CalBar = ({ value, goal, isTraining }) => {
+  const over = value > goal;
+  return (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6, alignItems:"center" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <span style={{ fontSize:11, color:"rgba(255,255,255,0.5)", letterSpacing:1, textTransform:"uppercase" }}>Calories</span>
+          <span style={{ fontSize:9, padding:"2px 7px", borderRadius:4, fontWeight:600,
+            background:isTraining?"rgba(251,146,60,0.2)":"rgba(76,205,196,0.15)",
+            color:isTraining?"#fb923c":"#4ecdc4" }}>{isTraining?"🥊 練習日":"💤 休養日"}</span>
+        </div>
+        <span style={{ fontFamily:"'DM Mono',monospace", fontSize:22, fontWeight:700, color:over?"#ff6b6b":"#e8d5a3" }}>
+          {Math.round(value)} <span style={{ fontSize:13, color:"rgba(255,255,255,0.35)", fontWeight:400 }}>/ {goal} kcal</span>
+        </span>
+      </div>
+      <div style={{ height:8, background:"rgba(255,255,255,0.08)", borderRadius:4, overflow:"hidden" }}>
+        <div style={{ height:"100%", width:`${Math.min((value/goal)*100,100)}%`,
+          background:over?"linear-gradient(90deg,#ff6b6b,#ff4757)":"linear-gradient(90deg,#e8d5a3,#c4a96e)",
+          borderRadius:4, transition:"width 0.6s ease" }}/>
+      </div>
+      <div style={{ display:"flex", justifyContent:"space-between", marginTop:4 }}>
+        <span style={{ fontSize:10, color:"rgba(255,255,255,0.3)" }}>0</span>
+        <span style={{ fontSize:10, color:over?"#ff6b6b":"rgba(255,255,255,0.3)" }}>
+          {over ? `+${Math.round(value-goal)} オーバー` : `あと ${Math.round(goal-value)} kcal`}
+        </span>
+      </div>
+    </div>
+  );
+};
+
+const BodyStatRow = ({ label, value, unit }) => (
+  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0", borderBottom:"1px solid rgba(255,255,255,0.05)" }}>
+    <span style={{ fontSize:12, color:"rgba(255,255,255,0.45)" }}>{label}</span>
+    <span style={{ fontFamily:"'DM Mono',monospace", fontSize:13, fontWeight:600, color:"#e8d5a3" }}>{value}<span style={{ fontSize:11, color:"rgba(255,255,255,0.35)", marginLeft:2 }}>{unit}</span></span>
+  </div>
+);
+
+const mealTimeLabel = { breakfast:"朝食", lunch:"昼食", dinner:"夕食", snack:"間食" };
+const mealTimeColor = { breakfast:"#f0a500", lunch:"#4ecdc4", dinner:"#a78bfa", snack:"#fb923c" };
+
+// ── Main App ────────────────────────────────────
+
+// ── 食事コピペパネル ──────────────────────────────
+// Claudeからのテキスト形式: "朝食 | 鶏胸肉150g・玄米 | 480kcal P42g F8g C58g"
+const parseMealText = (text) => {
+  const results = [];
+  const timeMap = { 朝食:"breakfast", 昼食:"lunch", 夕食:"dinner", 間食:"snack",
+                    breakfast:"breakfast", lunch:"lunch", dinner:"dinner", snack:"snack" };
+  const lines = text.trim().split("\n").filter(l => l.trim());
+  for (const line of lines) {
+    // 形式: 朝食 | 料理名 | 480kcal P42g F8g C58g
+    const parts = line.split("|").map(s => s.trim());
+    if (parts.length < 3) continue;
+    const timeStr = parts[0];
+    const name    = parts[1];
+    const nums    = parts[2];
+    const cal  = nums.match(/([\d.]+)\s*kcal/i);
+    const prot = nums.match(/P\s*([\d.]+)\s*g/i);
+    const fat  = nums.match(/F\s*([\d.]+)\s*g/i);
+    const carb = nums.match(/C\s*([\d.]+)\s*g/i);
+    if (!cal) continue;
+    results.push({
+      id: Date.now() + Math.random(),
+      time: timeMap[timeStr] || "snack",
+      name,
+      calories: Math.round(parseFloat(cal[1])),
+      protein:  Math.round(parseFloat(prot?.[1] || 0)),
+      fat:      Math.round(parseFloat(fat?.[1]  || 0)),
+      carbs:    Math.round(parseFloat(carb?.[1] || 0)),
+    });
+  }
+  return results;
+};
+
+const MealPastePanel = ({ selectedDate, setData }) => {
+  const [text, setText]       = useState("");
+  const [preview, setPreview] = useState([]);
+  const [saved, setSaved]     = useState(false);
+
+  const handleChange = (e) => {
+    const val = e.target.value;
+    setText(val);
+    setPreview(parseMealText(val));
+    setSaved(false);
+  };
+
+  const save = () => {
+    if (!preview.length) return;
+    setData(prev => {
+      const day = prev[selectedDate] || { weight:null, training:false, body:null, meals:[] };
+      return { ...prev, [selectedDate]: { ...day, meals:[...(day.meals||[]), ...preview] } };
+    });
+    setSaved(true);
+    setText("");
+    setPreview([]);
+    setTimeout(() => setSaved(false), 1500);
+  };
+
+  return (
+    <div>
+      <div style={{ fontSize:11, color:"rgba(255,255,255,0.35)", marginBottom:8, lineHeight:1.7 }}>
+        食事の写真をここのチャットに送ると、Claudeがこの形式で返してくれます。それをそのまま貼ってください📎
+      </div>
+      <textarea value={text} onChange={handleChange}
+        placeholder={"朝食 | オートミール・ゆで卵 | 380kcal P38g F9g C42g\n昼食 | 鶏胸肉・玄米・ブロッコリー | 480kcal P42g F8g C58g"}
+        rows={4}
+        style={{ width:"100%", background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.12)", borderRadius:10, padding:"12px 14px", color:"#fff", fontSize:12, fontFamily:"'DM Mono',monospace", outline:"none", resize:"vertical", lineHeight:1.8 }}
+      />
+      {preview.length > 0 && (
+        <div style={{ marginTop:10, background:"rgba(78,205,196,0.07)", border:"1px solid rgba(78,205,196,0.2)", borderRadius:10, padding:"12px 14px" }}>
+          <div style={{ fontSize:10, color:"#4ecdc4", letterSpacing:1, marginBottom:8 }}>✅ 読み取り結果（{preview.length}件）</div>
+          {preview.map((m,i) => (
+            <div key={i} style={{ fontSize:12, color:"rgba(255,255,255,0.75)", marginBottom:5, display:"flex", justifyContent:"space-between" }}>
+              <span><span style={{ color:mealTimeColor[m.time] }}>{mealTimeLabel[m.time]}</span>　{m.name}</span>
+              <span style={{ fontFamily:"'DM Mono',monospace", color:"#e8d5a3", flexShrink:0, marginLeft:8 }}>{m.calories}kcal</span>
+            </div>
+          ))}
+          <div style={{ fontSize:11, color:"rgba(255,255,255,0.4)", marginTop:6 }}>
+            合計: {preview.reduce((s,m)=>s+m.calories,0)}kcal　P{preview.reduce((s,m)=>s+m.protein,0)}g　F{preview.reduce((s,m)=>s+m.fat,0)}g　C{preview.reduce((s,m)=>s+m.carbs,0)}g
+          </div>
+          <button onClick={save}
+            style={{ width:"100%", marginTop:10, background:saved?"#4ecdc4":"#e8d5a3", color:"#0f0f13", border:"none", borderRadius:10, padding:"10px 0", cursor:"pointer", fontSize:13, fontWeight:700, fontFamily:"inherit", transition:"background 0.3s" }}>
+            {saved ? "✓ 保存しました！" : "この内容で保存"}
+          </button>
+        </div>
+      )}
+      {text.length > 5 && preview.length === 0 && (
+        <div style={{ marginTop:8, fontSize:11, color:"#fb923c" }}>形式が合いません。Claudeからのテキストをそのまま貼ってください。</div>
+      )}
+    </div>
+  );
+};
+
+// ── テキストペースト → 体組成自動パース ──────────
+const parseBodyText = (text) => {
+  const n = (patterns) => {
+    for (const p of patterns) {
+      const m = text.match(p);
+      if (m) return parseFloat(m[1]);
+    }
+    return null;
+  };
+  return {
+    weight:      n([/体重[^\d]*?([\d.]+)\s*kg/i, /^([\d.]+)\s*kg/m]),
+    fatPct:      n([/体脂肪率?[^\d]*?([\d.]+)/i, /fat[^\d]*([\d.]+)/i]),
+    leanMass:    n([/除脂肪体?重?[^\d]*?([\d.]+)/i, /lean[^\d]*([\d.]+)/i]),
+    muscleMass:  n([/筋肉量[^\d]*?([\d.]+)/i, /muscle\s*mass[^\d]*([\d.]+)/i]),
+    visceralFat: n([/内臓脂肪[^\d]*?([\d]+)/i, /visceral[^\d]*([\d]+)/i]),
+    water:       n([/体水分率?[^\d]*?([\d.]+)/i, /water[^\d]*([\d.]+)/i]),
+    musclePct:   n([/骨格筋[^\d]*?([\d.]+)/i, /skeletal[^\d]*([\d.]+)/i]),
+    subFat:      n([/皮下脂肪[^\d]*?([\d.]+)/i]),
+    boneMass:    n([/骨量[^\d]*?([\d.]+)/i, /bone[^\d]*([\d.]+)/i]),
+    proteinPct:  n([/タンパク質?[^\d]*?([\d.]+)/i, /protein[^\d]*([\d.]+)/i]),
+    bmr:         n([/基礎代謝量?[^\d]*?([\d]+)/i, /bmr[^\d]*([\d]+)/i, /kcal[^\d]*([\d]+)/i]),
+    bmi:         n([/bmi[^\d]*([\d.]+)/i]),
+  };
+};
+
+const BodyPastePanel = ({ selectedDate, setData, hasBody }) => {
+  const [open, setOpen]       = useState(false);
+  const [text, setText]       = useState("");
+  const [preview, setPreview] = useState(null);
+  const [saved, setSaved]     = useState(false);
+
+  // 日付が変わったらパネルをリセット
+  useEffect(() => {
+    setOpen(false);
+    setText("");
+    setPreview(null);
+    setSaved(false);
+  }, [selectedDate]);
+
+  const handlePaste = (e) => {
+    const pasted = e.clipboardData?.getData("text") || e.target.value;
+    setText(pasted);
+    const parsed = parseBodyText(pasted);
+    const hasAny = Object.values(parsed).some(v => v !== null);
+    setPreview(hasAny ? parsed : null);
+    setSaved(false);
+  };
+
+  const handleChange = (e) => {
+    setText(e.target.value);
+    const parsed = parseBodyText(e.target.value);
+    const hasAny = Object.values(parsed).some(v => v !== null);
+    setPreview(hasAny ? parsed : null);
+    setSaved(false);
+  };
+
+  const save = () => {
+    if (!preview) return;
+    const body = {};
+    Object.entries(preview).forEach(([k,v]) => { if (v !== null) body[k] = v; });
+    const newWeight = body.weight || null;
+    const { weight: _w, ...bodyWithoutWeight } = body;
+    setData(prev => {
+      const day = prev[selectedDate] || { weight:null, training:false, body:null, meals:[] };
+      return {
+        ...prev,
+        [selectedDate]: {
+          ...day,
+          weight: newWeight !== null ? newWeight : day.weight,
+          body: { ...(day.body||{}), ...bodyWithoutWeight },
+        }
+      };
+    });
+    setSaved(true);
+    setText("");
+    setPreview(null);
+    setTimeout(() => { setOpen(false); setSaved(false); }, 1200);
+  };
+
+  const labelMap = {
+    weight:"体重", fatPct:"体脂肪率", leanMass:"除脂肪体重", muscleMass:"筋肉量",
+    visceralFat:"内臓脂肪", water:"体水分率", musclePct:"骨格筋", subFat:"皮下脂肪",
+    boneMass:"骨量", proteinPct:"タンパク質", bmr:"基礎代謝", bmi:"BMI",
+  };
+  const unitMap = {
+    weight:"kg", fatPct:"%", leanMass:"kg", muscleMass:"kg",
+    visceralFat:"", water:"%", musclePct:"%", subFat:"%",
+    boneMass:"kg", proteinPct:"%", bmr:"kcal", bmi:"",
+  };
+
+  return (
+    <div style={{ marginTop:10 }}>
+      <button onClick={() => { setOpen(!open); setText(""); setPreview(null); setSaved(false); }}
+        style={{ width:"100%", background:"rgba(255,255,255,0.04)", border:"1px dashed rgba(255,255,255,0.15)", borderRadius:10, padding:"10px 0", color:"rgba(255,255,255,0.45)", fontSize:11, cursor:"pointer", fontFamily:"inherit" }}>
+        {open ? "▲ 閉じる" : `📋 ${hasBody ? "体組成を更新（テキスト貼付）" : "体組成を入力（テキスト貼付）"}`}
+      </button>
+
+      {open && (
+        <div style={{ marginTop:10 }}>
+          <div style={{ fontSize:11, color:"rgba(255,255,255,0.35)", marginBottom:6, lineHeight:1.7 }}>
+            このチャットで「今朝の体重」と送るとClaudeがテキストで返してくれます。<br/>それをそのままここに貼ってください📎
+          </div>
+          <textarea
+            value={text}
+            onChange={handleChange}
+            onPaste={handlePaste}
+            placeholder={"例:\n体重: 56.6kg\n体脂肪率: 24.5%\n筋肉量: 40.2kg\n除脂肪体重: 42.7kg\n内臓脂肪: 3\n体水分率: 51.8%\n基礎代謝: 1293kcal"}
+            rows={6}
+            style={{ width:"100%", background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.12)", borderRadius:10, padding:"12px 14px", color:"#fff", fontSize:12, fontFamily:"'DM Mono',monospace", outline:"none", resize:"vertical", lineHeight:1.8 }}
+          />
+
+          {preview && (
+            <div style={{ marginTop:10, background:"rgba(78,205,196,0.07)", border:"1px solid rgba(78,205,196,0.2)", borderRadius:10, padding:"12px 14px" }}>
+              <div style={{ fontSize:10, color:"#4ecdc4", letterSpacing:1, textTransform:"uppercase", marginBottom:8 }}>✅ 読み取り結果</div>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"4px 16px" }}>
+                {Object.entries(preview).filter(([,v])=>v!==null).map(([k,v]) => (
+                  <div key={k} style={{ fontSize:12, color:"rgba(255,255,255,0.7)", display:"flex", justifyContent:"space-between" }}>
+                    <span style={{ color:"rgba(255,255,255,0.4)" }}>{labelMap[k]}</span>
+                    <span style={{ fontFamily:"'DM Mono',monospace", color:"#e8d5a3" }}>{v}{unitMap[k]}</span>
+                  </div>
+                ))}
+              </div>
+              <button onClick={save}
+                style={{ width:"100%", marginTop:10, background: saved?"#4ecdc4":"#e8d5a3", color:"#0f0f13", border:"none", borderRadius:10, padding:"10px 0", cursor:"pointer", fontSize:13, fontWeight:700, fontFamily:"inherit", transition:"background 0.3s" }}>
+                {saved ? "✓ 保存しました！" : "この内容で保存"}
+              </button>
+            </div>
+          )}
+
+          {text.length > 5 && !preview && (
+            <div style={{ marginTop:8, fontSize:11, color:"#fb923c" }}>数値が読み取れませんでした。体重・体脂肪率などが含まれるテキストを貼ってください。</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+
+function App() {
+  const [data, setData]               = useState(null);
+  const [selectedDate, setSelectedDate] = useState(today());
+  const [tab, setTab]                 = useState("today");
+  const [input, setInput]             = useState("");
+  const [mealTime, setMealTime]       = useState("lunch");
+  const [mealInputMode, setMealInputMode] = useState("type");
+  const [loading, setLoading]         = useState(false);
+  const [weightInput, setWeightInput] = useState("");
+  const [aiError, setAiError]         = useState(null);
+  const [storageReady, setStorageReady] = useState(false);
+  const [saveStatus, setSaveStatus]     = useState("");
+  const [showGoalInfo, setShowGoalInfo]       = useState(false);
+  const [showPhaseDetail, setShowPhaseDetail] = useState(false);
+
+  // Image/advice states (advice can be set from chat context)
+  const [advice, setAdvice] = useState(null);
+
+  // Chat states
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput]       = useState("");
+  const [chatLoading, setChatLoading]   = useState(false);
+  const chatBottomRef = useRef(null);
+
+  const inputRef    = useRef(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await Promise.resolve({value: localStorage.getItem("health-tracker-data")});
+        setData(r?.value ? JSON.parse(r.value) : JSON.parse(JSON.stringify(SAMPLE_DATA)));
+      } catch { setData(JSON.parse(JSON.stringify(SAMPLE_DATA))); }
+      setStorageReady(true);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!storageReady || data===null) return;
+    (async () => {
+      try {
+        await Promise.resolve(localStorage.setItem("health-tracker-data", JSON.stringify(data)));
+        setSaveStatus("saved");
+        setTimeout(() => setSaveStatus(""), 2000);
+      } catch { setSaveStatus("error"); }
+    })();
+  }, [data, storageReady]);
+
+  const exportData = () => {
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type:"application/json" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href = url; a.download = `health-data-${today()}.json`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importData = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        setData(parsed);
+        alert("データを復元しました！");
+      } catch { alert("ファイルの読み込みに失敗しました。"); }
+    };
+    reader.readAsText(file);
+  };
+
+  // Auto-scroll chat — must be before early return
+  useEffect(() => {
+    if (tab === "chat") chatBottomRef.current?.scrollIntoView({ behavior:"smooth" });
+  }, [chatMessages, tab]);
+
+  if (data===null) return (
+    <div style={{ minHeight:"100vh", background:"#0f0f13", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:12 }}>
+      <div style={{ width:32, height:32, border:"3px solid rgba(255,255,255,0.1)", borderTop:"3px solid #e8d5a3", borderRadius:"50%", animation:"spin 0.8s linear infinite" }}/>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      <div style={{ color:"rgba(255,255,255,0.3)", fontSize:13, fontFamily:"sans-serif" }}>読み込み中…</div>
+    </div>
+  );
+
+  const dayData    = data[selectedDate] || { weight:null, training:false, body:null, meals:[] };
+  const isTraining = dayData.training || false;
+  const currentPhase = getPhase(selectedDate);
+  const phaseCalories = currentPhase?.calorieOverride
+    ? (isTraining ? currentPhase.calorieOverride.training : currentPhase.calorieOverride.rest)
+    : null;
+  const GOAL = {
+    ...(isTraining ? GOALS.training : GOALS.rest),
+    ...(phaseCalories ? { calories: phaseCalories } : {}),
+  };
+  const totals     = getMealTotals(dayData.meals);
+
+  const weightHistory = Object.entries(data)
+    .filter(([,d]) => d.weight)
+    .sort(([a],[b]) => a.localeCompare(b))
+    .map(([date,d]) => ({ date:date.slice(5), weight:d.weight, full:date }));
+  const allDates = Object.keys(data).sort((a,b) => b.localeCompare(a));
+  const avgWeight = weightHistory.length ? (weightHistory.reduce((s,d)=>s+d.weight,0)/weightHistory.length).toFixed(1) : null;
+  const latestWeight = weightHistory.length ? weightHistory[weightHistory.length-1].weight : 56.75;
+  const remaining = (latestWeight - TARGET_WEIGHT).toFixed(2);
+  const days = daysUntilMatch();
+
+  const toggleTraining = () => setData(prev => {
+    const day = prev[selectedDate] || { weight:null, training:false, body:null, meals:[] };
+    return { ...prev, [selectedDate]: { ...day, meals:[...(day.meals||[])], training:!day.training } };
+  });
+
+  const saveWeight = () => {
+    const w = parseFloat(weightInput);
+    if (!isNaN(w) && w > 0) {
+      setData(prev => {
+        const day = prev[selectedDate] || { weight:null, training:false, body:null, meals:[] };
+        return { ...prev, [selectedDate]: { ...day, meals:[...(day.meals||[])], weight:w } };
+      });
+      setWeightInput("");
+    }
+  };
+
+  // ── 食品データベース（ローカル推定） ──────────────
+  const estimateNutrition = (text) => {
+    const t = text.toLowerCase();
+    const db = [
+      { keys:["バナナ","banana"],         cal:90,  p:1,  f:0, c:23, name:"バナナ1本" },
+      { keys:["キウイ","kiwi"],           cal:53,  p:1,  f:0, c:13, name:"キウイ1個" },
+      { keys:["りんご","apple"],          cal:80,  p:0,  f:0, c:21, name:"りんご1個" },
+      { keys:["オレンジ","orange"],       cal:60,  p:1,  f:0, c:15, name:"オレンジ1個" },
+      { keys:["卵","egg","たまご"],       cal:75,  p:6,  f:5, c:1,  name:"ゆで卵1個" },
+      { keys:["プロテイン","protein shake"],cal:120,p:25, f:1, c:3,  name:"プロテイン1杯" },
+      { keys:["鶏胸肉","chicken breast"], cal:165, p:31, f:4, c:0,  name:"鶏胸肉150g" },
+      { keys:["鶏むね","むね肉"],         cal:165, p:31, f:4, c:0,  name:"鶏むね肉150g" },
+      { keys:["サーモン","salmon"],       cal:180, p:25, f:9, c:0,  name:"サーモン100g" },
+      { keys:["豆腐","tofu"],             cal:80,  p:7,  f:4, c:2,  name:"豆腐150g" },
+      { keys:["玄米","brown rice"],       cal:220, p:5,  f:2, c:46, name:"玄米1杯" },
+      { keys:["白米","ご飯","rice"],      cal:250, p:4,  f:0, c:55, name:"白米1杯" },
+      { keys:["オートミール","oats"],     cal:150, p:5,  f:3, c:27, name:"オートミール50g" },
+      { keys:["ブロッコリー","broccoli"], cal:35,  p:3,  f:0, c:7,  name:"ブロッコリー100g" },
+      { keys:["ほうれん草","spinach"],    cal:20,  p:2,  f:0, c:3,  name:"ほうれん草100g" },
+      { keys:["ヨーグルト","yogurt"],     cal:100, p:10, f:0, c:14, name:"無脂肪ヨーグルト" },
+      { keys:["味噌汁","みそ汁"],         cal:40,  p:3,  f:1, c:5,  name:"味噌汁1杯" },
+      { keys:["プロテインバー","protein bar"],cal:200,p:20,f:6,c:22,name:"プロテインバー" },
+      { keys:["サラダチキン"],            cal:110, p:22, f:2, c:0,  name:"サラダチキン" },
+      { keys:["豚ヒレ","豚ひれ"],         cal:130, p:22, f:4, c:0,  name:"豚ヒレ100g" },
+      { keys:["白身魚","たら","cod"],     cal:90,  p:20, f:1, c:0,  name:"白身魚100g" },
+      { keys:["アボカド","avocado"],      cal:120, p:1,  f:11,c:6,  name:"アボカド半分" },
+      { keys:["さつまいも","sweet potato"],cal:130,p:1,  f:0, c:31, name:"さつまいも100g" },
+    ];
+    // 数量倍率
+    const qty = (text.match(/(\d+)\s*(個|本|杯|枚|切|g|kg)/)?.[1]) || 1;
+    const matched = db.filter(d => d.keys.some(k => t.includes(k)));
+    if (!matched.length) {
+      // 不明な食品はデフォルト推定
+      return { name: text.slice(0,30), calories:200, protein:10, fat:5, carbs:25 };
+    }
+    const scale = matched.length > 1 ? 1 : Number(qty);
+    return {
+      name: matched.map(d=>d.name).join("・"),
+      calories: Math.round(matched.reduce((s,d)=>s+d.cal,0) * (scale > 5 ? 1 : scale > 1 ? scale * 0.7 : 1)),
+      protein:  Math.round(matched.reduce((s,d)=>s+d.p,0)),
+      fat:      Math.round(matched.reduce((s,d)=>s+d.f,0)),
+      carbs:    Math.round(matched.reduce((s,d)=>s+d.c,0)),
+    };
+  };
+
+  // ── Meal submit ──────────────────────────────
+  const submitMeal = () => {
+    if (!input.trim()) return;
+    setLoading(true); setAiError(null);
+    try {
+      const est = estimateNutrition(input);
+      setData(prev => {
+        const day = prev[selectedDate] || { weight:null, training:false, body:null, meals:[] };
+        return { ...prev, [selectedDate]: { ...day, meals:[...(day.meals||[]), {
+          id:Date.now(), time:mealTime, name:est.name||input,
+          calories:est.calories, protein:est.protein, fat:est.fat, carbs:est.carbs,
+        }]}};
+      });
+      setInput("");
+    } catch { setAiError("入力エラー。もう一度試してください。"); }
+    setLoading(false);
+  };
+
+  const deleteMeal = (id) => setData(prev => {
+    const day = prev[selectedDate];
+    return { ...prev, [selectedDate]: { ...day, meals:day.meals.filter(m=>m.id!==id) } };
+  });
+
+  // Build today's context string for AI
+  const buildContext = () => {
+    const t = totals;
+    const mealLog = dayData.meals.length > 0
+      ? dayData.meals.map(m => `  ・${mealTimeLabel[m.time]}: ${m.name} (${m.calories}kcal P${m.protein}g F${m.fat}g C${m.carbs}g)`).join("\n")
+      : "  まだ未記録";
+    const bodyInfo = dayData.body
+      ? `体脂肪率${dayData.body.fatPct}%, 筋肉量${dayData.body.muscleMass}kg, 除脂肪${dayData.body.leanMass}kg, 内臓脂肪レベル${dayData.body.visceralFat}, 体水分${dayData.body.water}%, 基礎代謝${dayData.body.bmr}kcal`
+      : "未計測";
+    const phaseInfo = currentPhase
+      ? `現在のフェーズ: ${currentPhase.name}（${currentPhase.target}）\nフェーズルール: ${currentPhase.rules.join(" / ")}\n控えるもの: ${currentPhase.avoid.join("、")}`
+      : "フェーズ: 通常期";
+    return `【本日の状況 (${selectedDate})】
+体重: ${dayData.weight ?? "未記録"}kg ／ 目標: ${TARGET_WEIGHT}kg ／ 残り: ${remaining}kg ／ 試合まで${days}日
+体組成: ${bodyInfo}
+今日のモード: ${isTraining ? "練習あり（スパー1〜2時間）" : "休養日（デスクワーク）"}
+${phaseInfo}
+カロリー目標: ${GOAL.calories}kcal ／ 摂取済み: ${t.calories}kcal ／ 残り: ${Math.max(0, GOAL.calories - t.calories)}kcal
+PFC目標: P${GOAL.protein}g F${GOAL.fat}g C${GOAL.carbs}g
+PFC摂取済み: P${t.protein}g F${t.fat}g C${t.carbs}g ／ 残り: P${Math.max(0,GOAL.protein-t.protein)}g F${Math.max(0,GOAL.fat-t.fat)}g C${Math.max(0,GOAL.carbs-t.carbs)}g
+食事記録:\n${mealLog}`;
+  };
+
+  const sendChat = async () => {
+    const text = chatInput.trim();
+    if (!text || chatLoading) return;
+    const userMsg = { role:"user", content:text };
+    setChatMessages(prev => [...prev, userMsg]);
+    setChatInput("");
+    setChatLoading(true);
+    try {
+      const history = [...chatMessages, userMsg].map(m => ({ role:m.role, content:m.content }));
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method:"POST", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({
+          model:"claude-sonnet-4-20250514", max_tokens:600,
+          system:`あなたはプロのスポーツ栄養士AIです。以下のユーザー情報を常に参照しながら会話してください。
+
+【固定プロフィール】
+- 40歳女性、キックボクシング選手
+- 試合: ${MATCH_DATE} アンダー55kg階級
+- 仕事: デスクワーク。練習日はスパー1〜2時間
+- 脂質は最低35g以上（女性ホルモン維持のため）
+
+${buildContext()}
+
+【回答ルール】
+- 日本語でフレンドリー＆専門的に
+- 残りカロリー・PFCを必ず意識した提案をする
+- 「何食べていい？」には具体的な食品名・量・タイミングを提示
+- 食事評価は褒める点→改善点の順で
+- 200字以内でコンパクトに。絵文字を自然に使う`,
+          messages: history,
+        }),
+      });
+      const json = await res.json();
+      const reply = json.content?.map(c=>c.text||"").join("") || "エラーが発生しました";
+      setChatMessages(prev => [...prev, { role:"assistant", content:reply }]);
+    } catch {
+      setChatMessages(prev => [...prev, { role:"assistant", content:"エラーが発生しました。もう一度試してください🙏" }]);
+    }
+    setChatLoading(false);
+  };
+
+  // ────────────────────────────────────────────
+  return (
+    <div style={{ minHeight:"100vh", background:"#0f0f13", fontFamily:"'DM Sans','Noto Sans JP',sans-serif", color:"#fff", paddingBottom:60 }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500;700&family=Noto+Sans+JP:wght@300;400;500;700&display=swap');
+        *{box-sizing:border-box;margin:0;padding:0}
+        ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.15);border-radius:2px}
+        input,select{outline:none}
+        .meal-row:hover{background:rgba(255,255,255,0.05)!important}
+        .tab-btn,.toggle-btn{transition:all 0.2s}.tab-btn:hover{opacity:0.8}
+        .del-btn{opacity:0;transition:opacity 0.2s}.meal-row:hover .del-btn{opacity:1}
+        .upload-zone{transition:all 0.2s}.upload-zone:hover{border-color:rgba(232,213,163,0.5)!important;background:rgba(232,213,163,0.05)!important}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+        .advice-box{animation:fadeIn 0.4s ease}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+        .pulsing{animation:pulse 1.4s ease infinite}
+        .chat-msg{animation:fadeIn 0.3s ease}
+        .chat-input-row input::placeholder{color:rgba(255,255,255,0.25)}
+      `}</style>
+
+      {/* ── Header ── */}
+      <div style={{ padding:"20px 20px 0", maxWidth:480, margin:"0 auto" }}>
+        {/* Match banner */}
+        <div style={{ background:"linear-gradient(135deg,rgba(251,146,60,0.1),rgba(167,139,250,0.1))", border:"1px solid rgba(251,146,60,0.22)", borderRadius:14, padding:"13px 16px", marginBottom:14, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+          <div>
+            <div style={{ fontSize:9, color:"rgba(255,255,255,0.4)", letterSpacing:2, textTransform:"uppercase", marginBottom:3 }}>🥊 試合まで</div>
+            <div style={{ fontFamily:"'DM Mono',monospace", fontSize:28, fontWeight:700, color:"#fb923c", lineHeight:1 }}>{days} <span style={{ fontSize:13, color:"rgba(255,255,255,0.45)", fontWeight:400 }}>days</span></div>
+            <div style={{ fontSize:10, color:"rgba(255,255,255,0.3)", marginTop:3 }}>3/22 アンダー55kg｜朝目標 {MORNING_TARGET}kg</div>
+          </div>
+          <div style={{ textAlign:"right" }}>
+            <div style={{ fontSize:9, color:"rgba(255,255,255,0.4)", letterSpacing:1, textTransform:"uppercase", marginBottom:3 }}>残り減量</div>
+            <div style={{ fontFamily:"'DM Mono',monospace", fontSize:24, fontWeight:700, color:parseFloat(remaining)<=0?"#4ecdc4":"#e8d5a3" }}>
+              {parseFloat(remaining)<=0 ? "✓ 達成!" : `${remaining} kg`}
+            </div>
+            <div style={{ fontSize:10, color:"rgba(255,255,255,0.3)", marginTop:3 }}>目標 {TARGET_WEIGHT}kg</div>
+          </div>
+        </div>
+
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
+          <div>
+            <div style={{ fontSize:11, color:"rgba(255,255,255,0.35)", letterSpacing:2, textTransform:"uppercase", marginBottom:2 }}>Body & Nutrition</div>
+            <div style={{ fontSize:20, fontWeight:700, letterSpacing:-0.5 }}>トラッカー</div>
+          </div>
+          <input type="date" value={selectedDate} onChange={e=>setSelectedDate(e.target.value)}
+            style={{ background:"rgba(255,255,255,0.07)", border:"1px solid rgba(255,255,255,0.12)", borderRadius:10, padding:"8px 12px", color:"#fff", fontSize:12, cursor:"pointer" }}/>
+        </div>
+        {saveStatus==="error" && (
+          <div style={{ background:"rgba(255,107,107,0.15)", border:"1px solid rgba(255,107,107,0.3)", borderRadius:10, padding:"10px 14px", marginBottom:10, fontSize:12, color:"#ff6b6b" }}>
+            ⚠️ 自動保存に失敗しています。下の「💾 データを保存」ボタンでバックアップしてください。
+          </div>
+        )}
+        {/* データバックアップ */}
+        <div style={{ display:"flex", gap:8, marginBottom:14 }}>
+          <button onClick={exportData}
+            style={{ flex:1, background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.12)", borderRadius:10, padding:"9px 0", color:"rgba(255,255,255,0.6)", fontSize:11, cursor:"pointer", fontFamily:"inherit", fontWeight:600 }}>
+            💾 データをバックアップ
+          </button>
+          <label style={{ flex:1, background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.12)", borderRadius:10, padding:"9px 0", color:"rgba(255,255,255,0.6)", fontSize:11, cursor:"pointer", fontFamily:"inherit", fontWeight:600, textAlign:"center", display:"block" }}>
+            📂 バックアップから復元
+            <input type="file" accept=".json" onChange={importData} style={{ display:"none" }}/>
+          </label>
+        </div>
+
+        {/* Tabs */}
+        <div style={{ display:"flex", gap:4, background:"rgba(255,255,255,0.05)", borderRadius:12, padding:4, marginBottom:18 }}>
+          {[["today","今日の記録"],["history","履歴"],["weight","体重グラフ"],["chat","栄養士に相談"]].map(([key,label]) => (
+            <button key={key} className="tab-btn" onClick={()=>setTab(key)}
+              style={{ flex:1, padding:"8px 0", borderRadius:9, border:"none", cursor:"pointer", fontSize:10, fontWeight:600,
+                background:tab===key?"rgba(255,255,255,0.12)":"transparent",
+                color:tab===key?"#fff":"rgba(255,255,255,0.4)", fontFamily:"inherit" }}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ maxWidth:480, margin:"0 auto", padding:"0 20px" }}>
+
+        {/* ══ TODAY TAB ══ */}
+        {tab==="today" && (
+          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+
+            {/* ── フェーズカード ── */}
+            {(() => {
+              const phase = getPhase(selectedDate);
+              if (!phase) return null;
+              return (
+                <div style={{ background:`linear-gradient(135deg,${phase.color}18,${phase.color}08)`, border:`1px solid ${phase.color}40`, borderRadius:16, overflow:"hidden" }}>
+                  <div style={{ padding:"14px 18px" }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                        <span style={{ fontSize:18 }}>{phase.emoji}</span>
+                        <span style={{ fontSize:12, fontWeight:700, color:phase.color }}>{phase.name}</span>
+                      </div>
+                      <button onClick={()=>setShowPhaseDetail(d=>!d)}
+                        style={{ background:"none", border:`1px solid ${phase.color}40`, borderRadius:6, padding:"3px 10px", color:phase.color, fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>
+                        {showPhaseDetail?"▲ 閉じる":"▼ 詳細"}
+                      </button>
+                    </div>
+                    <div style={{ fontSize:12, color:"rgba(255,255,255,0.6)" }}>{phase.target}</div>
+                  </div>
+                  {showPhaseDetail && (
+                    <div style={{ padding:"0 18px 16px", borderTop:`1px solid ${phase.color}20` }}>
+                      <div style={{ paddingTop:14 }}>
+                        <div style={{ fontSize:10, color:phase.color, letterSpacing:1, textTransform:"uppercase", marginBottom:8 }}>この期間のルール</div>
+                        {phase.rules.map((r,i) => (
+                          <div key={i} style={{ fontSize:12, color:"rgba(255,255,255,0.75)", marginBottom:5, display:"flex", gap:8 }}>
+                            <span style={{ color:phase.color, flexShrink:0 }}>✓</span><span>{r}</span>
+                          </div>
+                        ))}
+                        <div style={{ marginTop:12, display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                          <div>
+                            <div style={{ fontSize:10, color:"#4ecdc4", marginBottom:6, letterSpacing:0.5 }}>✅ 食べていいもの</div>
+                            {phase.foods.map((f,i) => <div key={i} style={{ fontSize:11, color:"rgba(255,255,255,0.6)", marginBottom:3 }}>・{f}</div>)}
+                          </div>
+                          <div>
+                            <div style={{ fontSize:10, color:"#ff6b6b", marginBottom:6, letterSpacing:0.5 }}>❌ 控えるもの</div>
+                            {phase.avoid.map((f,i) => <div key={i} style={{ fontSize:11, color:"rgba(255,255,255,0.6)", marginBottom:3 }}>・{f}</div>)}
+                          </div>
+                        </div>
+                        {phase.calorieOverride && (
+                          <div style={{ marginTop:10, background:"rgba(0,0,0,0.2)", borderRadius:8, padding:"8px 12px", fontSize:11, color:"rgba(255,255,255,0.5)" }}>
+                            ⚡ このフェーズのカロリー目標：休養日 <span style={{ color:phase.color }}>{phase.calorieOverride.rest}kcal</span> / 練習日 <span style={{ color:phase.color }}>{phase.calorieOverride.training}kcal</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {/* ── 体重 / 体組成カード ── */}
+            <div style={{ background:"rgba(255,255,255,0.04)", borderRadius:16, padding:"16px 18px", border:"1px solid rgba(255,255,255,0.07)" }}>
+
+              {/* 上段：体重表示 + 練習日トグル */}
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:14 }}>
+                <div>
+                  <div style={{ fontSize:10, color:"rgba(255,255,255,0.35)", letterSpacing:1, textTransform:"uppercase", marginBottom:4 }}>体重 / 体組成</div>
+                  {dayData.weight
+                    ? <div style={{ fontFamily:"'DM Mono',monospace", fontSize:34, fontWeight:700, color:"#e8d5a3", lineHeight:1 }}>
+                        {dayData.weight} <span style={{ fontSize:15, color:"rgba(255,255,255,0.4)", fontWeight:400 }}>kg</span>
+                      </div>
+                    : <div style={{ fontSize:14, color:"rgba(255,255,255,0.3)" }}>未記録</div>
+                  }
+                </div>
+                <button className="toggle-btn" onClick={toggleTraining}
+                  style={{ padding:"7px 16px", borderRadius:20, border:"none", cursor:"pointer",
+                    background:isTraining?"rgba(251,146,60,0.22)":"rgba(255,255,255,0.07)",
+                    outline:`1px solid ${isTraining?"rgba(251,146,60,0.45)":"rgba(255,255,255,0.12)"}`,
+                    color:isTraining?"#fb923c":"rgba(255,255,255,0.4)", fontSize:11, fontWeight:700, fontFamily:"inherit" }}>
+                  {isTraining?"🥊 練習日":"💤 休養日"}
+                </button>
+              </div>
+
+              {/* 体重入力欄 */}
+              <div style={{ display:"flex", gap:8, marginBottom: dayData.body ? 14 : 0 }}>
+                <input
+                  type="number" step="0.05" placeholder="56.6"
+                  value={weightInput} onChange={e=>setWeightInput(e.target.value)}
+                  onKeyDown={e=>e.key==="Enter"&&saveWeight()}
+                  style={{ flex:1, background:"rgba(255,255,255,0.07)", border:"1px solid rgba(255,255,255,0.12)", borderRadius:10, padding:"10px 14px", color:"#fff", fontSize:15, fontFamily:"'DM Mono',monospace", outline:"none" }}
+                />
+                <button onClick={saveWeight}
+                  style={{ background:"#e8d5a3", color:"#0f0f13", border:"none", borderRadius:10, padding:"10px 18px", cursor:"pointer", fontSize:12, fontWeight:700, fontFamily:"inherit", whiteSpace:"nowrap" }}>
+                  体重を記録
+                </button>
+              </div>
+
+              {/* 体組成グリッド（記録済みの場合） */}
+              {dayData.body && (
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginBottom:14 }}>
+                  {[
+                    { label:"体脂肪率",  value:dayData.body.fatPct,      unit:"%" },
+                    { label:"筋肉量",    value:dayData.body.muscleMass,  unit:"kg" },
+                    { label:"除脂肪",    value:dayData.body.leanMass,    unit:"kg" },
+                    { label:"内臓脂肪",  value:dayData.body.visceralFat, unit:"" },
+                    { label:"体水分率",  value:dayData.body.water,       unit:"%" },
+                    { label:"基礎代謝",  value:dayData.body.bmr,         unit:"kcal" },
+                  ].map(({ label, value, unit }) => (
+                    <div key={label} style={{ background:"rgba(255,255,255,0.04)", borderRadius:10, padding:"8px 10px" }}>
+                      <div style={{ fontSize:9, color:"rgba(255,255,255,0.35)", marginBottom:3 }}>{label}</div>
+                      <div style={{ fontFamily:"'DM Mono',monospace", fontSize:14, fontWeight:600, color:"#e8d5a3" }}>
+                        {value}<span style={{ fontSize:10, color:"rgba(255,255,255,0.35)", marginLeft:2 }}>{unit}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* 体組成入力（展開式） */}
+              <BodyPastePanel selectedDate={selectedDate} setData={setData} hasBody={!!dayData.body} />
+            </div>
+
+            {/* ── AI Advice Card ── */}
+            {advice && (
+              <div className="advice-box" style={{ background:"linear-gradient(135deg,rgba(78,205,196,0.07),rgba(167,139,250,0.07))", borderRadius:16, padding:"16px 18px", border:"1px solid rgba(78,205,196,0.2)" }}>
+                <div style={{ fontSize:10, color:"#4ecdc4", letterSpacing:1, textTransform:"uppercase", marginBottom:10, fontWeight:600 }}>🤖 AIアドバイス</div>
+                <div style={{ fontSize:13, color:"rgba(255,255,255,0.8)", lineHeight:1.8, whiteSpace:"pre-wrap" }}>{advice}</div>
+              </div>
+            )}
+
+            {/* Calories */}
+            <div style={{ background:"rgba(255,255,255,0.04)", borderRadius:16, padding:"18px", border:"1px solid rgba(255,255,255,0.07)" }}>
+              <CalBar value={totals.calories} goal={GOAL.calories} isTraining={isTraining}/>
+            </div>
+
+            {/* PFC */}
+            <div style={{ background:"rgba(255,255,255,0.04)", borderRadius:16, padding:"18px", border:"1px solid rgba(255,255,255,0.07)" }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+                <div style={{ fontSize:10, color:"rgba(255,255,255,0.35)", letterSpacing:1, textTransform:"uppercase" }}>PFC バランス</div>
+                <button onClick={()=>setShowGoalInfo(!showGoalInfo)}
+                  style={{ background:"none", border:"1px solid rgba(255,255,255,0.12)", borderRadius:6, padding:"3px 9px", color:"rgba(255,255,255,0.4)", fontSize:9, cursor:"pointer", fontFamily:"inherit" }}>
+                  {showGoalInfo?"▲ 目標値の根拠":"▼ 目標値の根拠"}
+                </button>
+              </div>
+              {showGoalInfo && (
+                <div style={{ background:"rgba(255,255,255,0.04)", borderRadius:10, padding:"12px 14px", marginBottom:14, fontSize:11, color:"rgba(255,255,255,0.5)", lineHeight:1.9 }}>
+                  <div style={{ color:"rgba(255,255,255,0.7)", fontWeight:600, marginBottom:6, fontSize:12 }}>目標値の計算根拠</div>
+                  <div>基礎代謝: <span style={{ color:"#e8d5a3" }}>1,302 kcal</span>（RENPHO実測）</div>
+                  <div>練習あり日: 1302×1.7 − 500赤字 = <span style={{ color:"#fb923c" }}>1,700 kcal</span></div>
+                  <div>練習なし日: 1302×1.4 − 500赤字 = <span style={{ color:"#4ecdc4" }}>1,320 kcal</span></div>
+                  <div>P: 体重×1.9g = <span style={{ color:"#4ecdc4" }}>110g</span>（筋肉維持・減量期）</div>
+                  <div>F: <span style={{ color:"#f7b731" }}>35g</span>（女性ホルモン・生理維持のため最低30g以上）</div>
+                  <div>C: 残りカロリーから逆算（練習日165g / 休養日100g）</div>
+                </div>
+              )}
+              <div style={{ display:"flex", justifyContent:"space-around" }}>
+                <ProgressRing value={totals.protein} goal={GOAL.protein} color="#4ecdc4" label="たんぱく質"/>
+                <ProgressRing value={totals.fat}     goal={GOAL.fat}     color="#f7b731" label="脂質"/>
+                <ProgressRing value={totals.carbs}   goal={GOAL.carbs}   color="#a78bfa" label="炭水化物"/>
+              </div>
+            </div>
+
+            {/* Meal Log */}
+            <div style={{ background:"rgba(255,255,255,0.04)", borderRadius:16, border:"1px solid rgba(255,255,255,0.07)" }}>
+              <div style={{ padding:"16px 18px 12px", fontSize:10, color:"rgba(255,255,255,0.35)", letterSpacing:1, textTransform:"uppercase" }}>食事ログ</div>
+              {dayData.meals.length===0 && <div style={{ padding:"0 18px 18px", color:"rgba(255,255,255,0.25)", fontSize:13 }}>まだ記録がありません</div>}
+              {dayData.meals.map(meal => (
+                <div key={meal.id} className="meal-row" style={{ padding:"10px 18px", display:"flex", alignItems:"center", gap:10, borderTop:"1px solid rgba(255,255,255,0.05)", cursor:"default" }}>
+                  <div style={{ width:6, height:6, borderRadius:3, background:mealTimeColor[meal.time]||"#888", flexShrink:0, marginTop:1 }}/>
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontSize:11, color:mealTimeColor[meal.time]||"#888", marginBottom:2 }}>{mealTimeLabel[meal.time]||meal.time}</div>
+                    <div style={{ fontSize:13, fontWeight:500 }}>{meal.name}</div>
+                    <div style={{ fontSize:11, color:"rgba(255,255,255,0.35)", marginTop:2 }}>P {meal.protein}g　F {meal.fat}g　C {meal.carbs}g</div>
+                  </div>
+                  <div style={{ textAlign:"right" }}>
+                    <div style={{ fontFamily:"'DM Mono',monospace", fontSize:15, fontWeight:600, color:"#e8d5a3" }}>{meal.calories}</div>
+                    <div style={{ fontSize:10, color:"rgba(255,255,255,0.3)" }}>kcal</div>
+                  </div>
+                  <button className="del-btn" onClick={()=>deleteMeal(meal.id)}
+                    style={{ background:"none", border:"none", color:"#ff6b6b", cursor:"pointer", fontSize:16, padding:"0 4px", lineHeight:1 }}>×</button>
+                </div>
+              ))}
+            </div>
+
+            {/* Meal Input */}
+            <div style={{ background:"rgba(255,255,255,0.04)", borderRadius:16, padding:"16px 18px", border:"1px solid rgba(255,255,255,0.07)" }}>
+              <div style={{ fontSize:10, color:"rgba(255,255,255,0.35)", letterSpacing:1, textTransform:"uppercase", marginBottom:12 }}>食事を記録</div>
+
+              {/* タブ：テキスト入力 / コピペ */}
+              <div style={{ display:"flex", gap:4, background:"rgba(255,255,255,0.05)", borderRadius:8, padding:3, marginBottom:12 }}>
+                {[["type","✏️ テキスト入力"],["paste","📋 写真→コピペ"]].map(([k,label])=>(
+                  <button key={k} onClick={()=>setMealInputMode(k)}
+                    style={{ flex:1, padding:"6px 0", borderRadius:6, border:"none", cursor:"pointer", fontSize:11, fontWeight:600,
+                      background:mealInputMode===k?"rgba(255,255,255,0.12)":"transparent",
+                      color:mealInputMode===k?"#fff":"rgba(255,255,255,0.4)", fontFamily:"inherit" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {mealInputMode==="type" && (
+                <>
+                  <div style={{ display:"flex", gap:6, marginBottom:10 }}>
+                    {["breakfast","lunch","dinner","snack"].map(t => (
+                      <button key={t} onClick={()=>setMealTime(t)}
+                        style={{ flex:1, padding:"6px 0", borderRadius:8,
+                          border:`1px solid ${mealTime===t?mealTimeColor[t]:"rgba(255,255,255,0.1)"}`,
+                          background:mealTime===t?`${mealTimeColor[t]}20`:"transparent",
+                          color:mealTime===t?mealTimeColor[t]:"rgba(255,255,255,0.35)",
+                          fontSize:10, cursor:"pointer", fontFamily:"inherit", fontWeight:600 }}>
+                        {mealTimeLabel[t]}
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ display:"flex", gap:8 }}>
+                    <input ref={inputRef} value={input} onChange={e=>setInput(e.target.value)}
+                      onKeyDown={e=>e.key==="Enter"&&!loading&&submitMeal()}
+                      placeholder="例: 鶏胸肉150g・玄米・ブロッコリー"
+                      style={{ flex:1, background:"rgba(255,255,255,0.07)", border:"1px solid rgba(255,255,255,0.12)", borderRadius:10, padding:"11px 14px", color:"#fff", fontSize:13, fontFamily:"inherit", outline:"none" }}/>
+                    <button onClick={submitMeal} disabled={loading||!input.trim()}
+                      style={{ background:loading?"rgba(255,255,255,0.1)":"#e8d5a3", color:"#0f0f13", border:"none", borderRadius:10, padding:"0 18px", cursor:loading?"not-allowed":"pointer", fontSize:13, fontWeight:700, fontFamily:"inherit", whiteSpace:"nowrap", minWidth:64 }}>
+                      {loading?"…":"記録"}
+                    </button>
+                  </div>
+                  {aiError && <div style={{ marginTop:8, fontSize:12, color:"#ff6b6b" }}>{aiError}</div>}
+                  <div style={{ marginTop:8, fontSize:11, color:"rgba(255,255,255,0.25)" }}>AIがカロリーとPFCを自動計算します</div>
+                </>
+              )}
+
+              {mealInputMode==="paste" && (
+                <MealPastePanel selectedDate={selectedDate} setData={setData} />
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ══ HISTORY TAB ══ */}
+        {tab==="history" && (
+          <div>
+            <div style={{ background:"rgba(255,255,255,0.04)", borderRadius:16, border:"1px solid rgba(255,255,255,0.07)", overflow:"hidden" }}>
+              <div style={{ display:"grid", gridTemplateColumns:"80px 50px 26px 1fr 62px 44px 44px 52px", gap:2, padding:"10px 12px", borderBottom:"1px solid rgba(255,255,255,0.08)", fontSize:9, color:"rgba(255,255,255,0.3)", letterSpacing:1, textTransform:"uppercase" }}>
+                <span>日付</span><span>体重</span><span></span><span>食事</span><span>kcal</span><span>P</span><span>F</span><span>C</span>
+              </div>
+              {allDates.length===0 && <div style={{ padding:20, color:"rgba(255,255,255,0.3)", fontSize:13 }}>履歴なし</div>}
+              {allDates.map(date => {
+                const d=data[date];
+                if (!d) return null;
+                const t=getMealTotals(d.meals||[]);
+                const calOver = t.calories>0 && t.calories>(d.training?GOALS.training.calories:GOALS.rest.calories);
+                return (
+                  <div key={date} style={{ borderBottom:"1px solid rgba(255,255,255,0.05)", cursor:"pointer" }}
+                    onClick={()=>{ setSelectedDate(date); setTab("today"); }}>
+                    <div style={{ display:"grid", gridTemplateColumns:"80px 50px 26px 1fr 62px 44px 44px 52px", gap:2, padding:"11px 12px", alignItems:"center" }}>
+                      <span style={{ fontSize:12, fontFamily:"'DM Mono',monospace", color:"rgba(255,255,255,0.7)" }}>{date.slice(5)}</span>
+                      <span style={{ fontSize:12, fontFamily:"'DM Mono',monospace", color:"#e8d5a3" }}>{d.weight||"—"}</span>
+                      <span style={{ fontSize:11 }}>{d.training?"🥊":"💤"}</span>
+                      <span style={{ fontSize:11, color:"rgba(255,255,255,0.45)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                        {d.meals.map(m=>m.name).join("・")||"—"}
+                      </span>
+                      <span style={{ fontSize:13, fontFamily:"'DM Mono',monospace", fontWeight:600, color:calOver?"#ff6b6b":"#e8d5a3" }}>{t.calories||"—"}</span>
+                      <span style={{ fontSize:12, fontFamily:"'DM Mono',monospace", color:"#4ecdc4" }}>{t.protein||"—"}</span>
+                      <span style={{ fontSize:12, fontFamily:"'DM Mono',monospace", color:"#f7b731" }}>{t.fat||"—"}</span>
+                      <span style={{ fontSize:12, fontFamily:"'DM Mono',monospace", color:"#a78bfa" }}>{t.carbs||"—"}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ marginTop:10, fontSize:11, color:"rgba(255,255,255,0.25)", textAlign:"center" }}>行をタップで詳細表示</div>
+          </div>
+        )}
+
+        {/* ══ WEIGHT GRAPH TAB ══ */}
+        {tab==="weight" && (
+          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10 }}>
+              {[
+                { label:"最新", value:weightHistory.length?weightHistory[weightHistory.length-1].weight:"—", unit:"kg" },
+                { label:"平均", value:avgWeight||"—", unit:"kg" },
+                { label:"変化", value:weightHistory.length>=2?(weightHistory[weightHistory.length-1].weight-weightHistory[0].weight).toFixed(1):"—", unit:"kg", signed:true },
+              ].map(({ label, value, unit, signed }) => (
+                <div key={label} style={{ background:"rgba(255,255,255,0.04)", borderRadius:12, padding:"14px", border:"1px solid rgba(255,255,255,0.07)", textAlign:"center" }}>
+                  <div style={{ fontSize:9, color:"rgba(255,255,255,0.3)", letterSpacing:1, textTransform:"uppercase", marginBottom:6 }}>{label}</div>
+                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:20, fontWeight:700, color:signed&&value!=="—"?(parseFloat(value)<0?"#4ecdc4":"#ff6b6b"):"#e8d5a3" }}>
+                    {signed&&value!=="—"&&value>0?"+":""}{value}
+                  </div>
+                  <div style={{ fontSize:10, color:"rgba(255,255,255,0.3)" }}>{unit}</div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ background:"rgba(255,255,255,0.04)", borderRadius:16, padding:"18px 8px 12px", border:"1px solid rgba(255,255,255,0.07)" }}>
+              <div style={{ fontSize:10, color:"rgba(255,255,255,0.35)", letterSpacing:1, textTransform:"uppercase", marginBottom:12, paddingLeft:12 }}>体重推移</div>
+              {weightHistory.length<2 ? (
+                <div style={{ padding:"20px 18px", color:"rgba(255,255,255,0.3)", fontSize:13 }}>データが2件以上必要です</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={220}>
+                  <LineChart data={weightHistory} margin={{ top:5, right:30, left:0, bottom:5 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)"/>
+                    <XAxis dataKey="date" tick={{ fill:"rgba(255,255,255,0.3)", fontSize:10 }} axisLine={false} tickLine={false}/>
+                    <YAxis tick={{ fill:"rgba(255,255,255,0.3)", fontSize:10 }} axisLine={false} tickLine={false}
+                      domain={[
+                        () => TARGET_WEIGHT - 0.5,
+                        () => Math.ceil(weightHistory.reduce((m,d)=>Math.max(m,d.weight), 0) + 0.3)
+                      ]}/>
+                    <Tooltip contentStyle={{ background:"#1a1a22", border:"1px solid rgba(255,255,255,0.12)", borderRadius:10, fontSize:12, fontFamily:"'DM Mono',monospace" }}
+                      labelStyle={{ color:"rgba(255,255,255,0.5)" }} itemStyle={{ color:"#e8d5a3" }} formatter={v=>[`${v} kg`,"体重"]}/>
+                    {avgWeight && <ReferenceLine y={parseFloat(avgWeight)} stroke="rgba(255,255,255,0.1)" strokeDasharray="4 4"/>}
+                    <ReferenceLine y={TARGET_WEIGHT} stroke="rgba(251,146,60,0.5)" strokeDasharray="5 3"
+                      label={{ value:`目標 ${TARGET_WEIGHT}kg`, position:"insideBottomRight", fill:"rgba(251,146,60,0.7)", fontSize:9 }}/>
+                    <Line type="monotone" dataKey="weight" stroke="#e8d5a3" strokeWidth={2.5}
+                      dot={{ fill:"#e8d5a3", r:4, strokeWidth:0 }} activeDot={{ r:6, fill:"#fff", stroke:"#e8d5a3", strokeWidth:2 }}/>
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+
+            <div style={{ background:"rgba(255,255,255,0.04)", borderRadius:16, border:"1px solid rgba(255,255,255,0.07)", overflow:"hidden" }}>
+              <div style={{ padding:"14px 18px 10px", fontSize:10, color:"rgba(255,255,255,0.35)", letterSpacing:1, textTransform:"uppercase" }}>体重記録</div>
+              {[...weightHistory].reverse().map(({ full, weight }) => (
+                <div key={full} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 18px", borderTop:"1px solid rgba(255,255,255,0.05)" }}>
+                  <span style={{ fontSize:13, color:"rgba(255,255,255,0.55)", fontFamily:"'DM Mono',monospace" }}>{full}</span>
+                  <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                    <span style={{ fontSize:11, color:weight<=TARGET_WEIGHT?"#4ecdc4":"rgba(255,255,255,0.25)" }}>
+                      {weight<=TARGET_WEIGHT?"✓ 目標達成":`あと ${(weight-TARGET_WEIGHT).toFixed(2)}kg`}
+                    </span>
+                    <span style={{ fontFamily:"'DM Mono',monospace", fontSize:16, fontWeight:600, color:"#e8d5a3" }}>{weight} kg</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ══ CHAT TAB ══ */}
+        {tab==="chat" && (
+          <div style={{ display:"flex", flexDirection:"column", height:"calc(100vh - 230px)", minHeight:400 }}>
+
+            {/* Context summary pill */}
+            <div style={{ background:"rgba(255,255,255,0.04)", borderRadius:12, padding:"10px 14px", marginBottom:12, border:"1px solid rgba(255,255,255,0.07)", fontSize:11, color:"rgba(255,255,255,0.45)", lineHeight:1.8 }}>
+              <span style={{ color:"#4ecdc4", fontWeight:600 }}>📋 今日の状況を共有中　</span>
+              体重 <span style={{ color:"#e8d5a3" }}>{dayData.weight??"-"}kg</span>　
+              摂取 <span style={{ color:"#e8d5a3" }}>{totals.calories}kcal</span> / {GOAL.calories}kcal　
+              残り <span style={{ color: totals.calories > GOAL.calories ? "#ff6b6b" : "#4ecdc4" }}>{Math.max(0, GOAL.calories-totals.calories)}kcal</span>　
+              {isTraining ? "🥊練習日" : "💤休養日"}
+            </div>
+
+            {/* Quick prompts */}
+            {chatMessages.length === 0 && (
+              <div style={{ marginBottom:12 }}>
+                <div style={{ fontSize:10, color:"rgba(255,255,255,0.3)", marginBottom:8, letterSpacing:1, textTransform:"uppercase" }}>よく使う質問</div>
+                <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                  {["このあと何食べていい？","今日の食事を評価して","夕食のおすすめは？","今日の食事は減量向き？","プロテイン追加していい？","間食は何がいい？"].map(q => (
+                    <button key={q} onClick={()=>setChatInput(q)}
+                      style={{ background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:20, padding:"6px 12px", color:"rgba(255,255,255,0.6)", fontSize:11, cursor:"pointer", fontFamily:"inherit" }}>
+                      {q}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Messages */}
+            <div style={{ flex:1, overflowY:"auto", display:"flex", flexDirection:"column", gap:10, paddingRight:2, paddingBottom:4 }}>
+              {chatMessages.length === 0 && (
+                <div style={{ textAlign:"center", padding:"30px 20px", color:"rgba(255,255,255,0.2)", fontSize:13, lineHeight:2.2 }}>
+                  <div style={{ fontSize:32, marginBottom:8 }}>🥊</div>
+                  栄養士AIに何でも相談してください<br/>
+                  食事評価・次の食事提案・減量ペース確認など
+                </div>
+              )}
+              {chatMessages.map((m, i) => (
+                <div key={i} className="chat-msg" style={{ display:"flex", justifyContent:m.role==="user"?"flex-end":"flex-start", alignItems:"flex-start" }}>
+                  {m.role==="assistant" && (
+                    <div style={{ width:28, height:28, borderRadius:14, background:"linear-gradient(135deg,#4ecdc4,#a78bfa)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:13, flexShrink:0, marginRight:8, marginTop:2 }}>🥗</div>
+                  )}
+                  <div style={{
+                    maxWidth:"80%", padding:"11px 14px",
+                    borderRadius: m.role==="user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
+                    background: m.role==="user" ? "rgba(232,213,163,0.12)" : "rgba(78,205,196,0.07)",
+                    border: m.role==="user" ? "1px solid rgba(232,213,163,0.2)" : "1px solid rgba(78,205,196,0.18)",
+                    fontSize:13, lineHeight:1.8, color:"rgba(255,255,255,0.88)", whiteSpace:"pre-wrap",
+                  }}>
+                    {m.content}
+                  </div>
+                </div>
+              ))}
+              {chatLoading && (
+                <div className="chat-msg" style={{ display:"flex", alignItems:"center", gap:8 }}>
+                  <div style={{ width:28, height:28, borderRadius:14, background:"linear-gradient(135deg,#4ecdc4,#a78bfa)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:13 }}>🥗</div>
+                  <div style={{ background:"rgba(78,205,196,0.07)", border:"1px solid rgba(78,205,196,0.18)", borderRadius:"16px 16px 16px 4px", padding:"12px 16px", display:"flex", gap:5 }}>
+                    {[0,1,2].map(i=>(
+                      <div key={i} className="pulsing" style={{ width:6, height:6, borderRadius:3, background:"#4ecdc4", animationDelay:`${i*0.18}s` }}/>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div ref={chatBottomRef}/>
+            </div>
+
+            {/* Input */}
+            <div style={{ display:"flex", gap:8, marginTop:12, paddingTop:12, borderTop:"1px solid rgba(255,255,255,0.07)" }}>
+              <input
+                value={chatInput} onChange={e=>setChatInput(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&!e.shiftKey&&sendChat()}
+                placeholder="例: このあと何食べていい？"
+                style={{ flex:1, background:"rgba(255,255,255,0.07)", border:"1px solid rgba(255,255,255,0.12)", borderRadius:12, padding:"12px 14px", color:"#fff", fontSize:13, fontFamily:"inherit", outline:"none" }}
+              />
+              <button onClick={sendChat} disabled={chatLoading||!chatInput.trim()}
+                style={{ background:chatLoading||!chatInput.trim()?"rgba(255,255,255,0.07)":"linear-gradient(135deg,#4ecdc4,#a78bfa)", color:chatLoading||!chatInput.trim()?"rgba(255,255,255,0.25)":"#0f0f13", border:"none", borderRadius:12, padding:"0 18px", cursor:chatLoading?"not-allowed":"pointer", fontSize:18, fontWeight:700, minWidth:50, flexShrink:0, transition:"all 0.2s" }}>
+                ↑
+              </button>
+            </div>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+  </script>
+</body>
+</html>
